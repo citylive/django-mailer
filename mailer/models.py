@@ -79,7 +79,7 @@ class AttachmentManager(models.Manager):
         return attachment
 
 class Attachment(models.Model):
-    message = models.ForeignKey(Message)
+    message = models.ForeignKey(Message, on_delete=models.CASCADE)
     attachment_file = models.FileField(u'attachment file', upload_to='attachments/', blank=True)
     filename = models.CharField(max_length=255)
     mimetype = models.CharField(max_length=255, blank=True)
