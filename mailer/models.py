@@ -34,8 +34,8 @@ class MessageManager(models.Manager):
 class Message(models.Model):
     objects = MessageManager()
 
-    to_address = models.CharField(max_length=50)
-    from_address = models.CharField(max_length=50)
+    to_address = models.CharField(max_length=255)
+    from_address = models.CharField(max_length=255)
     subject = models.CharField(max_length=100)
     message_body = models.TextField()
     when_added = models.DateTimeField(default=datetime.now)
@@ -135,8 +135,8 @@ class MessageLogManager(models.Manager):
 class MessageLog(models.Model):
     objects = MessageLogManager()
 
-    to_address = models.CharField(max_length=50, db_index=True)
-    from_address = models.CharField(max_length=50)
+    to_address = models.CharField(max_length=255, db_index=True)
+    from_address = models.CharField(max_length=255)
     subject = models.CharField(max_length=100)
     message_body = models.TextField()
     when_added = models.DateTimeField()
