@@ -3,3 +3,7 @@
 
 # pycharm settings
 .idea/
+
+# intermediate install directories
+/build
+/dist
