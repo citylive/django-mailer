@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 
 setup(
@@ -9,11 +9,7 @@ setup(
     author="James Tauber",
     author_email="jtauber@jtauber.com",
     url="http://code.google.com/p/django-mailer/",
-    packages=[
-        "mailer",
-        "mailer.management",
-        "mailer.management.commands",
-    ],
+    packages=find_packages(),
     package_dir={"mailer": "mailer"},
     classifiers=[
         "Development Status :: 4 - Beta",
