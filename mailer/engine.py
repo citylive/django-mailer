@@ -5,7 +5,7 @@ import time
 from socket import error as socket_error
 import signal
 
-from mailer.lockfile import FileLock, AlreadyLocked, LockTimeout
+from locking.models import NonBlockingLock
 from django_statsd.clients import statsd
 
 from mailer.enums import RESULT_MAPPING
@@ -20,8 +20,6 @@ logger = getLogger(__name__)
 
 
 EMPTY_QUEUE_SLEEP = getattr(settings, "MAILER_EMPTY_QUEUE_SLEEP", 30)
-
-LOCK_WAIT_TIMEOUT = getattr(settings, "MAILER_LOCK_WAIT_TIMEOUT", -1)
 
 WHITELIST = getattr(settings, 'MAILER_WHITELIST', None)
 
@@ -62,94 +60,84 @@ def send_all(limit=None, timeout=None):
     Send all eligible messages in the queue.
     """
     # Get lock so only one process sends at the same time
-    lock = FileLock('send_mail')
-    try:
-        lock.acquire(LOCK_WAIT_TIMEOUT)
-    except AlreadyLocked:
-        logger.info('Already locked.')
-        return
-    except LockTimeout:
-        logger.info('Lock timed out.')
-        return
-
-    # Check for multiple mail hosts
-    hosts = getattr(settings, 'EMAIL_HOSTS', None)
-    if hosts is not None:
-        from gargoyle import gargoyle
-        for host, config in hosts.items():
-            if gargoyle.is_active('mailer-%s' % host):
-                settings.EMAIL_HOST = config['host']
-                settings.EMAIL_USE_TLS = config['use_tls']
-                settings.EMAIL_PORT = config['port']
-                settings.EMAIL_HOST_USER = config['user']
-                settings.EMAIL_HOST_PASSWORD = config['password']
-                break
+    with NonBlockingLock.objects.acquire_lock(lock_name='mailer_send_all'):
+        # Check for multiple mail hosts
+        hosts = getattr(settings, 'EMAIL_HOSTS', None)
+        if hosts is not None:
+            from gargoyle import gargoyle
+            for host, config in hosts.items():
+                if gargoyle.is_active('mailer-%s' % host):
+                    settings.EMAIL_HOST = config['host']
+                    settings.EMAIL_USE_TLS = config['use_tls']
+                    settings.EMAIL_PORT = config['port']
+                    settings.EMAIL_HOST_USER = config['user']
+                    settings.EMAIL_HOST_PASSWORD = config['password']
+                    break
 
 
-    # Start sending mails
-    total, successes, failures = 0, 0, 0
-    try:
-        for message in prioritize():
-            # Check limit
-            if limit is not None and total >= int(limit):
-                logger.info('Limit (%s) reached, stopping.' % limit)
-                break
+        # Start sending mails
+        total, successes, failures = 0, 0, 0
+        try:
+            for message in prioritize():
+                # Check limit
+                if limit is not None and total >= int(limit):
+                    logger.info('Limit (%s) reached, stopping.' % limit)
+                    break
 
-            # Check whitelist and don't send list
-            if DontSendEntry.objects.has_address(message.to_address) or not in_whitelist(message.to_address):
-                logger.info('Skipping mail to %s - on don\'t send list.' % message.to_address)
-                MessageLog.objects.log(message, RESULT_MAPPING['don\'t send'])
-                message.delete()
-            else:
-                try:
-                    logger.info('Sending message to %s' % message.to_address.encode("utf-8"))
-                    # Prepare body
-                    if message.html_body:
-                        msg = EmailMultiAlternatives(message.subject, message.message_body,
-                                message.from_address, [message.to_address])
-                        msg.attach_alternative(message.html_body, 'text/html')
-                    else:
-                        msg = EmailMessage(message.subject, message.message_body,
-                                message.from_address, [message.to_address])
-
-                    # Prepare attachments
-                    for attachment in message.attachment_set.all():
-                        mimetype = attachment.mimetype or 'application/octet-stream'
-                        msg.attach(attachment.filename, attachment.attachment_file.read(), mimetype)
-
-                    # If a timeout is set, set up a signal to throw an error, and cancel it when the send is done
-                    if timeout is not None:
-                        signal.signal(signal.SIGALRM, _handle_timeout)
-                        signal.alarm(timeout)
-                        try:
-                            msg.send()
-                        finally:
-                            signal.alarm(0)
-                    else:
-                        msg.send()
-                except (socket_error,
-                        UnicodeEncodeError,
-                        smtplib.SMTPSenderRefused,
-                        smtplib.SMTPRecipientsRefused,
-                        smtplib.SMTPAuthenticationError,
-                        smtplib.SMTPDataError), err:
-                    # Sending failed, defer message
-                    message.defer()
-                    logger.info('Message deferred due to failure: %s' % err)
-                    MessageLog.objects.log(message, RESULT_MAPPING['failure'], log_message=str(err))
-                    failures += 1
-                else:
-                    # Sending succeeded
-                    MessageLog.objects.log(message, RESULT_MAPPING['success'])
+                # Check whitelist and don't send list
+                if DontSendEntry.objects.has_address(message.to_address) or not in_whitelist(message.to_address):
+                    logger.info('Skipping mail to %s - on don\'t send list.' % message.to_address)
+                    MessageLog.objects.log(message, RESULT_MAPPING['don\'t send'])
                     message.delete()
-                    successes += 1
-            total += 1
-    finally:
-        lock.release()
-        if successes and failures:
-            statsd.gauge('mailer.success_rate', successes / failures)
-        else:
-            statsd.gauge('mailer.success_rate', 1)
+                else:
+                    try:
+                        logger.info('Sending message to %s' % message.to_address.encode("utf-8"))
+                        # Prepare body
+                        if message.html_body:
+                            msg = EmailMultiAlternatives(message.subject, message.message_body,
+                                    message.from_address, [message.to_address])
+                            msg.attach_alternative(message.html_body, 'text/html')
+                        else:
+                            msg = EmailMessage(message.subject, message.message_body,
+                                    message.from_address, [message.to_address])
+
+                        # Prepare attachments
+                        for attachment in message.attachment_set.all():
+                            mimetype = attachment.mimetype or 'application/octet-stream'
+                            msg.attach(attachment.filename, attachment.attachment_file.read(), mimetype)
+
+                        # If a timeout is set, set up a signal to throw an error, and cancel it when the send is done
+                        if timeout is not None:
+                            signal.signal(signal.SIGALRM, _handle_timeout)
+                            signal.alarm(timeout)
+                            try:
+                                msg.send()
+                            finally:
+                                signal.alarm(0)
+                        else:
+                            msg.send()
+                    except (socket_error,
+                            UnicodeEncodeError,
+                            smtplib.SMTPSenderRefused,
+                            smtplib.SMTPRecipientsRefused,
+                            smtplib.SMTPAuthenticationError,
+                            smtplib.SMTPDataError), err:
+                        # Sending failed, defer message
+                        message.defer()
+                        logger.info('Message deferred due to failure: %s' % err)
+                        MessageLog.objects.log(message, RESULT_MAPPING['failure'], log_message=str(err))
+                        failures += 1
+                    else:
+                        # Sending succeeded
+                        MessageLog.objects.log(message, RESULT_MAPPING['success'])
+                        message.delete()
+                        successes += 1
+                total += 1
+        finally:
+            if successes and failures:
+                statsd.gauge('mailer.success_rate', successes / failures)
+            else:
+                statsd.gauge('mailer.success_rate', 1)
 
 
 def send_loop():
@@ -162,3 +150,8 @@ def send_loop():
         while Message.objects.count() == 0:
             time.sleep(EMPTY_QUEUE_SLEEP)
         send_all()
+
+
+def retry_deferred():
+    count = Message.objects.retry_deferred()
+    logger.info("%s message(s) retried" % count)
